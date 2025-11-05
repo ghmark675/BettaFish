@@ -1,0 +1,93 @@
+FROM mysql:8.0-debian
+
+# Prevent Python from writing .pyc files and buffer stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Set default MySQL configuration (can be overridden)
+ENV MYSQL_DATABASE=bettafish
+
+# Install Python 3.11 and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
+    build-essential \
+    curl \
+    ca-certificates \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxtst6 \
+    libnss3 \
+    libxrandr2 \
+    libxkbcommon0 \
+    libasound2 \
+    libx11-xcb1 \
+    libxshmfence1 \
+    libgbm1 \
+    ffmpeg \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Set python3.11 as default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Install uv and expose it on PATH
+ENV PATH="/root/.local/bin:${PATH}"
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /app
+
+# Install Python dependencies first to leverage Docker layer caching
+COPY requirements.txt ./ 
+RUN uv pip install --system --break-system-packages -r requirements.txt && \
+    python3.11 -m playwright install chromium
+
+# Copy application source
+COPY . .
+RUN cp .env.example .env
+
+# Ensure runtime directories exist even if ignored in build context
+RUN mkdir -p logs final_reports insight_engine_streamlit_reports media_engine_streamlit_reports query_engine_streamlit_reports
+
+# Expose Flask and Streamlit ports
+EXPOSE 5000 8501 8502 8503
+
+# Create startup script that launches both MySQL and the app, and initializes DB first
+RUN echo '#!/bin/bash\n\
+set -e\n\
+echo "Starting MySQL with docker-entrypoint..."\n\
+docker-entrypoint.sh mysqld &\n\
+echo "Waiting for MySQL to start..."\n\
+for i in {60..0}; do\n\
+  if mysqladmin ping -h localhost --silent 2>/dev/null; then\n\
+    echo "MySQL is up!"\n\
+    break\n\
+  fi\n\
+  echo "MySQL is unavailable - sleeping"\n\
+  sleep 1\n\
+done\n\
+if [ "$i" = 0 ]; then\n\
+  echo "MySQL failed to start"\n\
+  exit 1\n\
+fi\n\
+echo "MySQL is ready!"\n\
+echo "Starting application..."\n\
+python3.11 app.py' > /app/start.sh && chmod +x /app/start.sh
+
+# Default command launches MySQL and Flask orchestrator
+CMD ["/app/start.sh"]
